@@ -47,16 +47,22 @@ typedef struct sharedMemoryStruct
 
 shm_t* init()
 {
+    // Open or create a semaphore for synchronization
     sem_t* semaphore = sem_open(SHMEM_SEMAPHORE_NAME, O_CREAT, S_IRUSR | S_IWUSR, 1);
     if (SEM_FAILED == semaphore)
     {
         ERR("sem_open");
     }
+
+    // Wait for the semaphore to ensure exclusive access to shared resources
     sem_wait(semaphore);
+
     int initialize = 1;
+    // Attempt to create a new shared memory segment
     int shmFd = shm_open(SHMEM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
     if (-1 == shmFd)
     {
+        // If the shared memory segment already exists, proceed without initialization
         if (EEXIST == errno)
         {
             initialize = 0;
@@ -73,15 +79,21 @@ shm_t* init()
             ERR("shm_open");
         }
     }
+
+    // Initialize the shared memory segment if it's a new creation
     if (initialize && ftruncate(shmFd, SHMEM_SIZE) == -1)
     {
+        // If ftruncate fails, unlink the shared memory segment and release semaphore before exiting
         shm_unlink(SHMEM_NAME);
         sem_post(semaphore);
         ERR("ftruncate");
     }
+
+    // Map the shared memory segment into the address space
     shm_t* shmem = mmap(NULL, SHMEM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shmFd, 0);
     if (MAP_FAILED == shmem)
     {
+        // If mmap fails, unlink the shared memory segment and release semaphore before exiting
         if (initialize)
         {
             shm_unlink(SHMEM_NAME);
@@ -94,36 +106,46 @@ shm_t* init()
             ERR("mmap");
         }
     }
+
+    // Close the file descriptor for shared memory segment as it's no longer needed
     close(shmFd);
+
+    // Perform initialization if it's a new shared memory segment
     if (initialize)
     {
-        errno = 0;
+        // Initialize the mutex attribute for shared mutex
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
         pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
         pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
+        
+        // Initialize the shared mutex
         pthread_mutex_init(&shmem->mutex, &attr);
         if (errno)
         {
+            // If pthread_mutex_init fails, unlink the shared memory segment and release semaphore before exiting
             shm_unlink(SHMEM_NAME);
             sem_post(semaphore);
             ERR("pthread_mutex");
         }
+
+        // Initialize other shared data
         shmem->processCounter = 0;
         shmem->pointsHit = 0;
         shmem->pointsTotal = 0;
     }
-    shmem->processCounter++;
-    sem_post(semaphore);
-    sem_close(semaphore);
-    return shmem;
-}
 
-// Values of this function is in range (0,1]
-double func(double x)
-{
-    usleep(2000);
-    return exp(-x * x);
+    // Increase the process counter for the shared memory segment
+    shmem->processCounter++;
+
+    // Release the semaphore to allow other processes to access shared resources
+    sem_post(semaphore);
+
+    // Close the semaphore, it's no longer needed
+    sem_close(semaphore);
+
+    // Return a pointer to the initialized shared memory segment
+    return shmem;
 }
 
 /**
